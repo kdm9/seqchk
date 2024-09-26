@@ -1,0 +1,4 @@
+include seqchk/seqchk.LICENSE
+include seqchk/seqchk.CITATION
+include seqchk/seqchk.VERSION
+recursive-include seqchk *
