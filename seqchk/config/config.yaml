@@ -1,7 +1,10 @@
-# Namespaced config file example
 seqchk:
-    args: # Command line args will be (over)written here at runtime
-        input:
-        output: 
-        npairs: 10000
-    # Add customisable config here
+  args:
+    subsample: false
+    input:
+    ref: 
+    subsample_npairs: 10000
+
+dirs:
+  temp: "tmp"
+  output: "output"

@@ -3,7 +3,11 @@
 configfile: os.path.join(workflow.basedir, "../", "config", "config.yaml")
 configfile: os.path.join(workflow.basedir, "../", "config", "system_config.yaml")
 config.update(config["seqchk"]) # convenience if using namespaced config
-
+dirs = config.get("dirs", {})
+dirs.update({
+    "temp": "tmp",
+    "output": "output",
+}
 
 # Rules files
 include: os.path.join(workflow.basedir, "rules", "preflight.smk")
