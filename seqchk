@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
+# Copyright 2024 K. D. Murray
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 import argparse
 import re
 from collections import defaultdict
 from pathlib import Path
 from snakemake.api import SnakemakeApi
 import json
+from sys import stderr
 
 SNAKEFILE=r"""
 configfile: "config.json"
 
+tmp=Path(
 dirs={
     "temp": Path("tmp"),
     "output": Path("output"),
@@ -33,10 +40,10 @@ rule subsample:
         r1=lambda wc: config["samples"][wc.sample]["R1"],
         r2=lambda wc: config["samples"][wc.sample]["R2"],
     output:
-        r1=temp(dirs["temp"]/"reads/sub/{sample}_subsample_R1.fastq"),
-        r2=temp(dirs["temp"]/"reads/sub/{sample}_subsample_R2.fastq"),
+        r1=temp("tmp/reads/sub/{sample}_subsample_R1.fastq"),
+        r2=temp("tmp/reads/sub/{sample}_subsample_R2.fastq"),
     log:
-        dirs["temp"]/"reads/sub/{sample}_subsample.log",
+        "tmp/reads/sub/{sample}_subsample.log",
     threads: 1
     container: "docker://quay.io/mbhall88/rasusa"
     params:
@@ -67,13 +74,13 @@ rule fastp:
     input:
         unpack(fastp_input)
     output:
-        r1=temp(dirs["temp"]/"reads/qc/{sample}_qc_R1.fastq"),
-        r2=temp(dirs["temp"]/"reads/qc/{sample}_qc_R2.fastq"),
-        rs=temp(dirs["temp"]/"reads/qc/{sample}_qc_SE.fastq"),
-        json=dirs["temp"]/"reads/qc/{sample}_qc.json",
-        html=dirs["temp"]/"reads/qc/{sample}_qc.html",
+        r1=temp("tmp/reads/qc/{sample}_qc_R1.fastq"),
+        r2=temp("tmp/reads/qc/{sample}_qc_R2.fastq"),
+        rs=temp("tmp/reads/qc/{sample}_qc_SE.fastq"),
+        json="tmp/reads/qc/{sample}_qc.json",
+        html="tmp/reads/qc/{sample}_qc.html",
     log:
-        dirs["temp"]/"reads/qc/{sample}_qc.log",
+        "tmp/reads/qc/{sample}_qc.log",
     threads: 8
     container: "docker://quay.io/biocontainers/fastp:0.23.4--hadf994f_3"
     shell:
@@ -95,12 +102,12 @@ rule fastp:
 
 rule kraken:
     input:
-        r1=dirs["temp"]/"reads/qc/{sample}_qc_R1.fastq",
-        r2=dirs["temp"]/"reads/qc/{sample}_qc_R2.fastq",
+        r1="tmp/reads/qc/{sample}_qc_R1.fastq",
+        r2="tmp/reads/qc/{sample}_qc_R2.fastq",
     output:
-        report=dirs["output"]/"taxonid/kraken_{sample}_report.txt",
+        report="output/taxonid/kraken_{sample}_report.txt",
     log:
-        dirs["output"]/"taxonid/kraken_{sample}.log",
+        "output/taxonid/kraken_{sample}.log",
     resources:
         runtime=90,
         mem="100G",
@@ -120,14 +127,13 @@ rule kraken:
         "   {input.r1} {input.r2}"
         "   >/dev/null 2>{log}"
 
-
 rule idxref:
     input:
         ref=lambda wc: config["reference"],
     output:
-        idx=temp(dirs["temp"]/"ref.mmi"),
+        idx=temp("tmp/ref.mmi"),
     log:
-        dirs["temp"]/"ref.mmi.log",
+        "tmp/ref.mmi.log",
     threads: 4
     container: "docker://ghcr.io/kdm9/minimap2-samtools:latest"
     shell:
@@ -135,16 +141,16 @@ rule idxref:
 
 rule map:
     input:
-        r1=dirs["temp"]/"reads/qc/{sample}_qc_R1.fastq",
-        r2=dirs["temp"]/"reads/qc/{sample}_qc_R2.fastq",
-        idx=dirs["temp"]/"ref.mmi",
+        r1="tmp/reads/qc/{sample}_qc_R1.fastq",
+        r2="tmp/reads/qc/{sample}_qc_R2.fastq",
+        idx="tmp/ref.mmi",
     output:
-        bam=dirs["temp"]/"aln/{sample}.bam",
-        bai=dirs["temp"]/"aln/{sample}.bam.bai",
-        minimap=dirs["temp"]/"aln/{sample}_minimap.log",
-        markdup=dirs["temp"]/"aln/{sample}_markdup.log",
+        bam="tmp/aln/{sample}.bam",
+        bai="tmp/aln/{sample}.bam.bai",
+        minimap="output/aln/{sample}_minimap.log",
+        markdup="output/aln/{sample}_markdup.log",
     log:
-        log=dirs["temp"]/"aln/{sample}.log",
+        log="tmp/aln/{sample}.log",
     container: "docker://ghcr.io/kdm9/minimap2-samtools:latest"
     threads: 16
     resources:
@@ -178,9 +184,8 @@ rule map:
         "   /dev/stdout"
         " 2>{output.markdup}"
         " | tee {output.bam}"
-        " | samtools index - {output.bai}"  # indexing takes bloody ages, we may as well do this on the fly
+        " | samtools index - {output.bai}"
         " ) > {log.log} 2>&1"
-
 
 def multiqc_input(wc):
     res = []
@@ -191,7 +196,6 @@ def multiqc_input(wc):
         if config.get("kraken_db"):
             res.append(dirs["output"]/f"taxonid/kraken_{sample}_report.txt")
     return res
-
 
 rule multiqc_kraken:
     input: multiqc_input
@@ -208,13 +212,8 @@ rule multiqc_kraken:
         "   --filename {output.html}"
         "   {input}"
         " >{log} 2>&1"
-
-
 """
-
-
-
-#############################    CODE    #####################################################
+######################################### END SNAKEFILE #######################################################
 
 
 def existing_path(arg):
@@ -226,7 +225,7 @@ def existing_path(arg):
 
 
 class PathJsonEncoder(json.JSONEncoder):
-    """JSONEncoder that knows about Paths"""
+    """A JSONEncoder that knows about Paths"""
     def default(self, o):
         import pathlib
         if isinstance(o, pathlib.PurePath):
@@ -243,6 +242,7 @@ def fastq_pairer(fastqs):
         key = fn
         if not m:
             read = "??"
+            print(f"WARNING: fastq with unknown pairing. This program assumes raw, paired end illumina data! ({fastq})", file=stderr)
         else:
             key = m.group(1)
             read = m.group(2)
