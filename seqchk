@@ -8,13 +8,14 @@ import json
 
 SNAKEFILE=r"""
 configfile: "config.json"
+
 dirs={
     "temp": Path("tmp"),
     "output": Path("output"),
 }
 
 def all_inputs(wc):
-    res = []
+    res = ["output/multiqc.html",]
     for sample in config["samples"]:
         res.append(dirs["temp"]/ f"aln/{sample}.bam")
         if config.get("kraken_db"):
@@ -73,7 +74,7 @@ rule fastp:
         html=dirs["temp"]/"reads/qc/{sample}_qc.html",
     log:
         dirs["temp"]/"reads/qc/{sample}_qc.log",
-    threads: 4
+    threads: 8
     container: "docker://quay.io/biocontainers/fastp:0.23.4--hadf994f_3"
     shell:
         "fastp "
@@ -102,7 +103,7 @@ rule kraken:
         dirs["output"]/"taxonid/kraken_{sample}.log",
     resources:
         runtime=90,
-        mem="100G"
+        mem="100G",
     threads: 16
     container: "docker://ghcr.io/kdm9/kraken2:latest"
     params:
@@ -117,32 +118,7 @@ rule kraken:
         "   --report {output.report}"
         "   --paired"
         "   {input.r1} {input.r2}"
-        "   >{log} 2>&1"
-
-rule bracken:
-    input:
-        report=dirs["output"]/"taxonid/kraken_{sample}_report.txt",
-    output:
-        report=dirs["output"]/"taxonid/bracken_{sample}_brackenreport.txt",
-        txt=dirs["output"]/"taxonid/bracken_{sample}_bracken.txt",
-    log:
-        dirs["output"]/"taxonid/bracken_{sample}_bracken.log",
-    resources:
-        runtime=10,
-        mem="10G"
-    threads: 1
-    container: "docker://ghcr.io/kdm9/kraken2:latest"
-    params:
-        db=config.get("kraken_db"),
-    shell:
-        "bracken"
-        "   -d {params.db}"
-        "   -i {input.report}"
-        "   -o {output.txt}"
-        "   -w {output.report}"
-        "   -r 150"
-        "   -l S"
-        " &>{log}"
+        "   >/dev/null 2>{log}"
 
 
 rule idxref:
@@ -165,19 +141,22 @@ rule map:
     output:
         bam=dirs["temp"]/"aln/{sample}.bam",
         bai=dirs["temp"]/"aln/{sample}.bam.bai",
+        minimap=dirs["temp"]/"aln/{sample}_minimap.log",
+        markdup=dirs["temp"]/"aln/{sample}_markdup.log",
     log:
-        dirs["temp"]/"aln/{sample}.log",
+        log=dirs["temp"]/"aln/{sample}.log",
     container: "docker://ghcr.io/kdm9/minimap2-samtools:latest"
-    threads: 4
+    threads: 16
     resources:
         mem="16G"
     params:
-        mem=lambda wc, input, output, resources: int((resources.mem_mb*0.6)/resources._cores),
+        mem=lambda wc, input, output, resources: int((resources.mem_mb*0.4)/resources._cores),
     shell:
         "( minimap2 -ax sr"
         "   -t {threads}"
         "   {input.idx}"
         "   {input.r1} {input.r2}"
+        "   2>{output.minimap}"
         " | samtools fixmate "
         "   -m"
         "   -@ {threads}"
@@ -197,15 +176,41 @@ rule map:
         "   --output-fmt bam,level=0"
         "   /dev/stdin"
         "   /dev/stdout"
+        " 2>{output.markdup}"
         " | tee {output.bam}"
         " | samtools index - {output.bai}"  # indexing takes bloody ages, we may as well do this on the fly
-        " ) > {log} 2>&1"
+        " ) > {log.log} 2>&1"
+
+
+def multiqc_input(wc):
+    res = []
+    for sample in config["samples"]:
+        res.append(dirs["temp"]/ f"aln/{sample}_minimap.log")
+        res.append(dirs["temp"]/ f"aln/{sample}_markdup.log")
+        res.append(dirs["temp"]/ f"reads/qc/{sample}_qc.json")
+        if config.get("kraken_db"):
+            res.append(dirs["output"]/f"taxonid/kraken_{sample}_report.txt")
+    return res
+
+
+rule multiqc_kraken:
+    input: multiqc_input
+    output:
+        html="output/multiqc.html",
+    log:
+        "output/multiqc.log",
+    container: "docker://multiqc/multiqc:v1.20"
+    shell:
+        "multiqc"
+        "   --no-megaqc-upload"
+        "   --interactive"
+        "   --no-data-dir"
+        "   --filename {output.html}"
+        "   {input}"
+        " >{log} 2>&1"
+
+
 """
-
-
-
-
-
 
 
 
@@ -213,10 +218,20 @@ rule map:
 
 
 def existing_path(arg):
+    """Parse a CLI argument that must exist to a pathlib.Path (can be dir or file, so long as it exists)"""
     p = Path(arg)
     if not p.exists():
         raise ValueError(f"{arg} does not exist")
     return p
+
+
+class PathJsonEncoder(json.JSONEncoder):
+    """JSONEncoder that knows about Paths"""
+    def default(self, o):
+        import pathlib
+        if isinstance(o, pathlib.PurePath):
+            return str(o)
+        return super().default(o)
 
 
 def fastq_pairer(fastqs):
@@ -234,15 +249,6 @@ def fastq_pairer(fastqs):
         samples[key][read] = fastq
     return dict(samples.items())
 
-class PathJsonEncoder(json.JSONEncoder):
-#    def __init__(self, *args, **kwargs):
-#        super().__init__(self, *args, **kwargs)
-#
-    def default(self, o):
-        import pathlib
-        if isinstance(o, pathlib.PurePath):
-            return str(o)
-        return super().default(o)
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
@@ -254,10 +260,6 @@ def main(argv=None):
         help="Number of reads to subsample (0 to disable, which is the default)")
     ap.add_argument("--kraken-db", "-k", type=existing_path,
         help="Run Kraken + Bracken, using this DB (give dir name)")
-    #ap.add_argument("--cores", "-j", type=int, default=8,
-    #    help="Parallel cores")
-    #ap.add_argument("--profile", "-p", type=existing_path,
-    #    help="Snakemake profile")
     ap.add_argument("--workdir", type=Path, default=Path("seqchk.out"),
         help="Working dir")
     ap.add_argument("fastqs", type=existing_path, nargs="+")
@@ -280,6 +282,8 @@ def main(argv=None):
         print("tmp", file=fh)
         print("output", file=fh)
         print(".snakemake", file=fh)
+
+    print("Workflow written to {args.workdir}. To execute, please run `snakemake` from there, with your profile or any of the usual arguments needed to run snakemake locally.")
 
 if __name__ == "__main__":
     main()
