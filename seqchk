@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+import argparse
+import re
+from collections import defaultdict
+from pathlib import Path
+from snakemake.api import SnakemakeApi
+import json
+
+SNAKEFILE=r"""
+configfile: "config.json"
+dirs={
+    "temp": Path("tmp"),
+    "output": Path("output"),
+}
+
+def all_inputs(wc):
+    res = []
+    for sample in config["samples"]:
+        res.append(dirs["temp"]/ f"aln/{sample}.bam")
+        if config.get("kraken_db"):
+            res.append(dirs["output"]/f"taxonid/kraken_{sample}_report.txt")
+
+    return res
+
+
+rule all:
+    input: all_inputs
+
+
+rule subsample:
+    input:
+        r1=lambda wc: config["samples"][wc.sample]["R1"],
+        r2=lambda wc: config["samples"][wc.sample]["R2"],
+    output:
+        r1=temp(dirs["temp"]/"reads/sub/{sample}_subsample_R1.fastq"),
+        r2=temp(dirs["temp"]/"reads/sub/{sample}_subsample_R2.fastq"),
+    log:
+        dirs["temp"]/"reads/sub/{sample}_subsample.log",
+    threads: 1
+    container: "docker://quay.io/mbhall88/rasusa"
+    params:
+        seed=config["subsample_seed"],
+        nreads=config["subsample"],
+    shell:
+        "( rasusa reads"
+        "   --num {params.nreads}"
+        "   --seed {params.seed}"
+        "   -o {output.r1} -o {output.r2}"
+        "   {input.r1} {input.r2}"
+        ") 2>{log}"
+
+
+def fastp_input(wc):
+    if config["subsample"] > 0:
+        return {
+                "r1": dirs["temp"]/f"reads/sub/{wc.sample}_subsample_R1.fastq",
+                "r2": dirs["temp"]/f"reads/sub/{wc.sample}_subsample_R2.fastq",
+        }
+    else:
+        return {
+                "r1": config["samples"][wc.sample]["R1"],
+                "r2": config["samples"][wc.sample]["R2"],
+        }
+
+rule fastp:
+    input:
+        unpack(fastp_input)
+    output:
+        r1=temp(dirs["temp"]/"reads/qc/{sample}_qc_R1.fastq"),
+        r2=temp(dirs["temp"]/"reads/qc/{sample}_qc_R2.fastq"),
+        rs=temp(dirs["temp"]/"reads/qc/{sample}_qc_SE.fastq"),
+        json=dirs["temp"]/"reads/qc/{sample}_qc.json",
+        html=dirs["temp"]/"reads/qc/{sample}_qc.html",
+    log:
+        dirs["temp"]/"reads/qc/{sample}_qc.log",
+    threads: 4
+    container: "docker://quay.io/biocontainers/fastp:0.23.4--hadf994f_3"
+    shell:
+        "fastp "
+        "   --in1 {input.r1}"
+        "   --in2 {input.r2}"
+        "   --out1 {output.r1}"
+        "   --out2 {output.r2}"
+        "   --unpaired1 {output.rs}"
+        "   --unpaired2 {output.rs}"
+        "   --thread {threads}"
+        "   --json {output.json}"
+        "   --html {output.html}"
+        "   --low_complexity_filter"
+        "   --detect_adapter_for_pe"
+        "   --cut_tail"
+        "   --trim_poly_x"
+        ">{log} 2>&1"
+
+rule kraken:
+    input:
+        r1=dirs["temp"]/"reads/qc/{sample}_qc_R1.fastq",
+        r2=dirs["temp"]/"reads/qc/{sample}_qc_R2.fastq",
+    output:
+        report=dirs["output"]/"taxonid/kraken_{sample}_report.txt",
+    log:
+        dirs["output"]/"taxonid/kraken_{sample}.log",
+    resources:
+        runtime=90,
+        mem="100G"
+    threads: 16
+    container: "docker://ghcr.io/kdm9/kraken2:latest"
+    params:
+        db=config.get("kraken_db"),
+    shell:
+        "kraken2"
+        "   --db {params.db}"
+        "   --memory-mapping"
+        "   --threads {threads}"
+        "   --use-names"
+        "   --report-minimizer-data"
+        "   --report {output.report}"
+        "   --paired"
+        "   {input.r1} {input.r2}"
+        "   >{log} 2>&1"
+
+rule bracken:
+    input:
+        report=dirs["output"]/"taxonid/kraken_{sample}_report.txt",
+    output:
+        report=dirs["output"]/"taxonid/bracken_{sample}_brackenreport.txt",
+        txt=dirs["output"]/"taxonid/bracken_{sample}_bracken.txt",
+    log:
+        dirs["output"]/"taxonid/bracken_{sample}_bracken.log",
+    resources:
+        runtime=10,
+        mem="10G"
+    threads: 1
+    container: "docker://ghcr.io/kdm9/kraken2:latest"
+    params:
+        db=config.get("kraken_db"),
+    shell:
+        "bracken"
+        "   -d {params.db}"
+        "   -i {input.report}"
+        "   -o {output.txt}"
+        "   -w {output.report}"
+        "   -r 150"
+        "   -l S"
+        " &>{log}"
+
+
+rule idxref:
+    input:
+        ref=lambda wc: config["reference"],
+    output:
+        idx=temp(dirs["temp"]/"ref.mmi"),
+    log:
+        dirs["temp"]/"ref.mmi.log",
+    threads: 4
+    container: "docker://ghcr.io/kdm9/minimap2-samtools:latest"
+    shell:
+        "minimap2 -x sr -d {output.idx} -t {threads} {input.ref} &>{log}"
+
+rule map:
+    input:
+        r1=dirs["temp"]/"reads/qc/{sample}_qc_R1.fastq",
+        r2=dirs["temp"]/"reads/qc/{sample}_qc_R2.fastq",
+        idx=dirs["temp"]/"ref.mmi",
+    output:
+        bam=dirs["temp"]/"aln/{sample}.bam",
+        bai=dirs["temp"]/"aln/{sample}.bam.bai",
+    log:
+        dirs["temp"]/"aln/{sample}.log",
+    container: "docker://ghcr.io/kdm9/minimap2-samtools:latest"
+    threads: 4
+    resources:
+        mem="16G"
+    params:
+        mem=lambda wc, input, output, resources: int((resources.mem_mb*0.6)/resources._cores),
+    shell:
+        "( minimap2 -ax sr"
+        "   -t {threads}"
+        "   {input.idx}"
+        "   {input.r1} {input.r2}"
+        " | samtools fixmate "
+        "   -m"
+        "   -@ {threads}"
+        "   -u"
+        "   /dev/stdin"
+        "   /dev/stdout"
+        " | samtools sort"
+        "   -T ${{TMPDIR:-/tmp}}/{wildcards.sample}_sort_$RANDOM"
+        "   --output-fmt bam,level=0"
+        "   -@ {threads}"
+        "   -m {params.mem}m" # multiplied by {threads}
+        "   /dev/stdin"
+        " | samtools markdup"
+        "   -T ${{TMPDIR:-/tmp}}/{wildcards.sample}_markdup_$RANDOM"
+        "   -s" # report stats
+        "   -@ {threads}"
+        "   --output-fmt bam,level=0"
+        "   /dev/stdin"
+        "   /dev/stdout"
+        " | tee {output.bam}"
+        " | samtools index - {output.bai}"  # indexing takes bloody ages, we may as well do this on the fly
+        " ) > {log} 2>&1"
+"""
+
+
+
+
+
+
+
+
+#############################    CODE    #####################################################
+
+
+def existing_path(arg):
+    p = Path(arg)
+    if not p.exists():
+        raise ValueError(f"{arg} does not exist")
+    return p
+
+
+def fastq_pairer(fastqs):
+    samples = defaultdict(dict)
+    for fastq in fastqs:
+        fn = Path(fastq).name
+        fn = re.sub(r"(\.fq|\.fastq)(\.(gz|bz2|zstd|zst))?", "", fn)
+        m = re.search(r"(.+)_(R[12])(?=(_001|$))", fn)
+        key = fn
+        if not m:
+            read = "??"
+        else:
+            key = m.group(1)
+            read = m.group(2)
+        samples[key][read] = fastq
+    return dict(samples.items())
+
+class PathJsonEncoder(json.JSONEncoder):
+#    def __init__(self, *args, **kwargs):
+#        super().__init__(self, *args, **kwargs)
+#
+    def default(self, o):
+        import pathlib
+        if isinstance(o, pathlib.PurePath):
+            return str(o)
+        return super().default(o)
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--reference", "-r", type=existing_path, required=True,
+        help="Reference Genome")
+    ap.add_argument("--seed", "-S", type=int, default=3112342,
+        help="Random Seed for subsampling")
+    ap.add_argument("--subsample", "-s", type=int, default=0,
+        help="Number of reads to subsample (0 to disable, which is the default)")
+    ap.add_argument("--kraken-db", "-k", type=existing_path,
+        help="Run Kraken + Bracken, using this DB (give dir name)")
+    #ap.add_argument("--cores", "-j", type=int, default=8,
+    #    help="Parallel cores")
+    #ap.add_argument("--profile", "-p", type=existing_path,
+    #    help="Snakemake profile")
+    ap.add_argument("--workdir", type=Path, default=Path("seqchk.out"),
+        help="Working dir")
+    ap.add_argument("fastqs", type=existing_path, nargs="+")
+
+    args = ap.parse_args(argv)
+    args.workdir.mkdir(exist_ok=True)
+    with open(args.workdir / "config.json", "w") as fh:
+        json.dump({
+            "samples": fastq_pairer(args.fastqs),
+            "reference": args.reference.resolve(),
+            "subsample": args.subsample,
+            "subsample_seed": args.seed,
+            "kraken_db": args.kraken_db,
+        }, fh, indent=4, cls=PathJsonEncoder)
+
+    with open(args.workdir / "Snakefile", "w") as fh:
+        fh.write(SNAKEFILE)
+
+    with open(args.workdir / ".gitignore", "w") as fh:
+        print("tmp", file=fh)
+        print("output", file=fh)
+        print(".snakemake", file=fh)
+
+if __name__ == "__main__":
+    main()
