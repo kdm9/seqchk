@@ -19,9 +19,9 @@ configfile: "config.json"
 def all_inputs(wc):
     res = ["output/multiqc.html",]
     for sample in config["samples"]:
-        res.append(dirs["temp"]/ f"aln/{sample}.bam")
+        res.append(f"tmp/aln/{sample}.bam")
         if config.get("kraken_db"):
-            res.append(dirs["output"]/f"taxonid/kraken_{sample}_report.txt")
+            res.append(f"output/taxonid/kraken_report/{sample}.txt")
 
     return res
 rule all:
@@ -54,8 +54,8 @@ rule subsample:
 def fastp_input(wc):
     if config["subsample"] > 0:
         return {
-            "r1": dirs["temp"]/f"reads/sub/{wc.sample}_subsample_R1.fastq",
-            "r2": dirs["temp"]/f"reads/sub/{wc.sample}_subsample_R2.fastq",
+            "r1": f"tmp/reads/sub/{wc.sample}_subsample_R1.fastq",
+            "r2": f"tmp/reads/sub/{wc.sample}_subsample_R2.fastq",
         }
     else:
         return {
@@ -69,8 +69,8 @@ rule fastp:
         r1=temp("tmp/reads/qc/{sample}_qc_R1.fastq"),
         r2=temp("tmp/reads/qc/{sample}_qc_R2.fastq"),
         rs=temp("tmp/reads/qc/{sample}_qc_SE.fastq"),
-        json="tmp/reads/qc/{sample}_qc.json",
-        html="tmp/reads/qc/{sample}_qc.html",
+        json="output/log/fastp/{sample}.json",
+        html="output/log/fastp/{sample}.html",
     log:
         "tmp/reads/qc/{sample}_qc.log",
     threads: 8
@@ -97,9 +97,9 @@ rule kraken:
         r1="tmp/reads/qc/{sample}_qc_R1.fastq",
         r2="tmp/reads/qc/{sample}_qc_R2.fastq",
     output:
-        report="output/taxonid/kraken_{sample}_report.txt",
+        report="output/taxonid/kraken_report/{sample}.txt",
     log:
-        "output/taxonid/kraken_{sample}.log",
+        "output/log/kraken/{sample}.log",
     resources:
         runtime=90,
         mem="100G",
@@ -139,8 +139,8 @@ rule map:
     output:
         bam="tmp/aln/{sample}.bam",
         bai="tmp/aln/{sample}.bam.bai",
-        minimap="output/aln/{sample}_minimap.log",
-        markdup="output/aln/{sample}_markdup.log",
+        minimap="output/log/minimap/{sample}.log",
+        markdup="output/log/markdup/{sample}.log",
     log:
         log="tmp/aln/{sample}.log",
     container: "docker://ghcr.io/kdm9/minimap2-samtools:latest"
@@ -179,23 +179,40 @@ rule map:
         " | samtools index - {output.bai}"
         " ) > {log.log} 2>&1"
 
+
+rule samstats:
+    input:
+        "tmp/aln/{sample}.bam",
+    output:
+        "output/samstats/{sample}.txt",
+    log:
+        "output/log/samstats/{sample}.log",
+    threads: 1
+    resources:
+        mem="2G"
+    container: "docker://ghcr.io/kdm9/align:latest"
+    shell:
+        "(samtools stats -i 5000 -x {input} >{output}) >{log} 2>&1"
+
+
 def multiqc_input(wc):
     res = []
     for sample in config["samples"]:
-        res.append(dirs["temp"]/ f"aln/{sample}_minimap.log")
-        res.append(dirs["temp"]/ f"aln/{sample}_markdup.log")
-        res.append(dirs["temp"]/ f"reads/qc/{sample}_qc.json")
+        res.append(f"output/samstats/{sample}.txt")
+        res.append(f"output/log/minimap/{sample}.log")
+        res.append(f"output/log/markdup/{sample}.log")
+        res.append(f"output/log/fastp/{sample}.json")
         if config.get("kraken_db"):
-            res.append(dirs["output"]/f"taxonid/kraken_{sample}_report.txt")
+            res.append(f"output/taxonid/kraken_report/{sample}.txt")
     return res
 
-rule multiqc_kraken:
+rule multiqc:
     input: multiqc_input
     output:
         html="output/multiqc.html",
     log:
         "output/multiqc.log",
-    container: "docker://multiqc/multiqc:v1.20"
+    container: "docker://multiqc/multiqc:v1.25"
     shell:
         "multiqc"
         "   --no-megaqc-upload"
@@ -275,7 +292,7 @@ def main(argv=None):
         print("output", file=fh)
         print(".snakemake", file=fh)
 
-    print("Workflow written to {args.workdir}. To execute, please run `snakemake` from there, with your profile or any of the usual arguments needed to run snakemake locally.")
+    print(f"Workflow written to {args.workdir.resolve()}\nTo execute, please run `snakemake` from there, with your profile or any of the usual arguments needed to run snakemake locally.")
 
 if __name__ == "__main__":
     main()
