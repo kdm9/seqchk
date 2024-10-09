@@ -11,21 +11,23 @@ a workspace, then use snakemake to execute the generated workflow and produce
 the report.
 
 ```
-usage: seqchk [-h] --reference REFERENCE [--seed SEED] [--subsample SUBSAMPLE] [--kraken-db KRAKEN_DB] [--workdir WORKDIR] fastqs [fastqs ...]
+usage: seqchk [-h] --reference REFERENCE [--seed SEED] [--mash] [--subsample SUBSAMPLE] [--head HEAD] [--kraken-db KRAKEN_DB] [--workdir WORKDIR] fastqs [fastqs ...]
 
 positional arguments:
   fastqs
 
 options:
   -h, --help            show this help message and exit
-  --seed SEED, -S SEED  Random Seed for subsampling
-  --subsample SUBSAMPLE, -s SUBSAMPLE
-                        Number of reads to subsample (0 to disable, which is the default)
-  --kraken-db KRAKEN_DB, -k KRAKEN_DB
-                        Run Kraken2, using this DB (give db directory name)
   --reference REFERENCE, -r REFERENCE
                         Reference Genome
-  --workdir WORKDIR     Working dir (default: seqchk.out)
+  --seed SEED, -S SEED  Random Seed for subsampling
+  --mash, -m            Run mash?
+  --subsample SUBSAMPLE, -s SUBSAMPLE
+                        Number of reads to randomly subsample (0 to disable, which is the default)
+  --head HEAD, -H HEAD  Number of reads take from head of file
+  --kraken-db KRAKEN_DB, -k KRAKEN_DB
+                        Run Kraken + Bracken, using this DB (give dir name)
+  --workdir WORKDIR     Working dir
 ```
 
 # Example

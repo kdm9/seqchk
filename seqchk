@@ -18,7 +18,8 @@ configfile: "config.json"
 def all_inputs(wc):
     res = ["output/multiqc.html",]
     for sample in config["samples"]:
-        res.append(f"tmp/aln/{sample}.bam")
+        if config.get("reference"):
+            res.append(f"tmp/aln/{sample}.bam")
         if config.get("kraken_db"):
             res.append(f"output/taxonid/kraken_report/{sample}.txt")
     if config.get("mash"):
@@ -141,7 +142,7 @@ rule kraken:
 
 rule idxref:
     input:
-        ref=lambda wc: config["reference"],
+        ref=lambda wc: config.get("reference", []),
     output:
         idx=temp("tmp/ref.mmi"),
     log:
@@ -218,10 +219,11 @@ rule samstats:
 def multiqc_input(wc):
     res = []
     for sample in config["samples"]:
-        res.append(f"output/samstats/{sample}.txt")
-        res.append(f"output/log/minimap/{sample}.log")
-        res.append(f"output/log/markdup/{sample}.log")
         res.append(f"output/log/fastp/{sample}.json")
+        if config.get("reference"):
+            res.append(f"output/log/minimap/{sample}.log")
+            res.append(f"output/log/markdup/{sample}.log")
+            res.append(f"output/samstats/{sample}.txt")
         if config.get("kraken_db"):
             res.append(f"output/taxonid/kraken_report/{sample}.txt")
     return res
@@ -297,7 +299,7 @@ def existing_path(arg):
     p = Path(arg)
     if not p.exists():
         raise ValueError(f"{arg} does not exist")
-    return p
+    return p.absolute()
 
 
 class PathJsonEncoder(json.JSONEncoder):
@@ -328,9 +330,9 @@ def fastq_pairer(fastqs):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--reference", "-r", type=existing_path, required=True,
+    ap.add_argument("--reference", "-r", type=existing_path,
         help="Reference Genome")
-    ap.add_argument("--seed", "-S", type=int, default=3112342,
+    ap.add_argument("--seed", "-S", type=int, default=31912342,
         help="Random Seed for subsampling")
     ap.add_argument("--mash", "-m", action="store_true",
         help="Run mash?")
@@ -352,7 +354,7 @@ def main(argv=None):
     with open(args.workdir / "config.json", "w") as fh:
         json.dump({
             "samples": fastq_pairer(args.fastqs),
-            "reference": args.reference.resolve(),
+            "reference": args.reference,
             "subsample": args.subsample,
             "head": args.head,
             "subsample_seed": args.seed,
