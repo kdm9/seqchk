@@ -15,15 +15,16 @@ from sys import stderr
 SNAKEFILE=r"""
 configfile: "config.json"
 
-
 def all_inputs(wc):
     res = ["output/multiqc.html",]
     for sample in config["samples"]:
         res.append(f"tmp/aln/{sample}.bam")
         if config.get("kraken_db"):
             res.append(f"output/taxonid/kraken_report/{sample}.txt")
-
+    if config.get("mash"):
+        res.append("output/mash.dist.tsv")
     return res
+
 rule all:
     input: all_inputs
 
@@ -40,8 +41,8 @@ rule subsample:
     threads: 1
     container: "docker://quay.io/mbhall88/rasusa"
     params:
-        seed=config["subsample_seed"],
-        nreads=config["subsample"],
+        seed=config.get("subsample_seed", 2123),
+        nreads=config.get("subsample", 0),
     shell:
         "( rasusa reads"
         "   --num {params.nreads}"
@@ -51,11 +52,30 @@ rule subsample:
         ") 2>{log}"
 
 
+rule head:
+    input:
+        lambda wc: config["samples"][wc.sample][wc.read],
+    output:
+        temp("tmp/reads/sub/{sample}_head_{read}.fastq"),
+    log:
+        "tmp/reads/sub/{sample}_head_{read}.log",
+    threads: 1
+    params:
+        n=config.get("head", 0)*4,
+    shell:
+        "set +o pipefail; zcat {input} | head -n {params.n} > {output} 2>{log} "
+
+
 def fastp_input(wc):
     if config["subsample"] > 0:
         return {
             "r1": f"tmp/reads/sub/{wc.sample}_subsample_R1.fastq",
             "r2": f"tmp/reads/sub/{wc.sample}_subsample_R2.fastq",
+        }
+    elif config["head"] > 0:
+        return {
+            "r1": f"tmp/reads/sub/{wc.sample}_head_R1.fastq",
+            "r2": f"tmp/reads/sub/{wc.sample}_head_R2.fastq",
         }
     else:
         return {
@@ -73,7 +93,7 @@ rule fastp:
         html="output/log/fastp/{sample}.html",
     log:
         "tmp/reads/qc/{sample}_qc.log",
-    threads: 8
+    threads: 2
     container: "docker://quay.io/biocontainers/fastp:0.23.4--hadf994f_3"
     shell:
         "fastp "
@@ -144,7 +164,7 @@ rule map:
     log:
         log="tmp/aln/{sample}.log",
     container: "docker://ghcr.io/kdm9/minimap2-samtools:latest"
-    threads: 16
+    threads: 8
     resources:
         mem="16G"
     params:
@@ -221,6 +241,53 @@ rule multiqc:
         "   --filename {output.html}"
         "   {input}"
         " >{log} 2>&1"
+
+
+rule mash_sketch_set:
+    input:
+        expand("tmp/reads/qc/{sample}_qc_R1.fastq", sample=config["samples"]),
+    output:
+        "tmp/mash/sketch.msh"
+    log: "tmp/mash/sketch.msh.log"
+    container: "docker://ghcr.io/kdm9/mash:latest"
+    threads: 16
+    resources:
+        mem="16G"
+    params:
+        ksize=21,
+        sketchsize=10000,
+    shell:
+        " mash sketch"
+        "   -k {params.ksize}"
+        "   -s {params.sketchsize}"
+        "   -p {threads}"
+        "   -o {output}"
+        "   {input}"
+        " >{log} 2>&1"
+
+
+rule mash_dist_set:
+    input:
+        "tmp/mash/sketch.msh"
+    output:
+        "output/mash.dist.tsv"
+    log:
+        "output/mash.dist.tsv.log"
+    container: "docker://ghcr.io/kdm9/mash:latest"
+    threads: 16
+    resources:
+        mem="16G"
+    shell:
+        "mash dist"
+        "   -p {threads}"
+        "   -t" # tabular format
+        "   {input} {input}" # needs input twice
+        " >{output}"
+        " 2>{log}"
+
+
+
+
 """
 ######################################### END SNAKEFILE #######################################################
 
@@ -265,8 +332,12 @@ def main(argv=None):
         help="Reference Genome")
     ap.add_argument("--seed", "-S", type=int, default=3112342,
         help="Random Seed for subsampling")
+    ap.add_argument("--mash", "-m", action="store_true",
+        help="Run mash?")
     ap.add_argument("--subsample", "-s", type=int, default=0,
-        help="Number of reads to subsample (0 to disable, which is the default)")
+        help="Number of reads to randomly subsample (0 to disable, which is the default)")
+    ap.add_argument("--head", "-H", type=int, default=0,
+        help="Number of reads take from head of file")
     ap.add_argument("--kraken-db", "-k", type=existing_path,
         help="Run Kraken + Bracken, using this DB (give dir name)")
     ap.add_argument("--workdir", type=Path, default=Path("seqchk.out"),
@@ -274,12 +345,16 @@ def main(argv=None):
     ap.add_argument("fastqs", type=existing_path, nargs="+")
 
     args = ap.parse_args(argv)
+    if args.subsample > 0 and args.head > 0:
+        print("ERROR: can only give one of --subsample and --head", file=stderr)
+        raise RuntimeError()
     args.workdir.mkdir(exist_ok=True)
     with open(args.workdir / "config.json", "w") as fh:
         json.dump({
             "samples": fastq_pairer(args.fastqs),
             "reference": args.reference.resolve(),
             "subsample": args.subsample,
+            "head": args.head,
             "subsample_seed": args.seed,
             "kraken_db": args.kraken_db,
         }, fh, indent=4, cls=PathJsonEncoder)
