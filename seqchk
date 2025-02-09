@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2024 K. D. Murray
+# Copyright 2024-2025 Kevin Murray/Gekkonid Scientific Pty. Ltd.
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -13,6 +13,10 @@ import json
 from sys import stderr
 
 SNAKEFILE=r"""
+# Copyright 2024-2025 Kevin Murray/Gekkonid Scientific Pty. Ltd.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
 configfile: "config.json"
 
 def all_inputs(wc):
@@ -22,6 +26,7 @@ def all_inputs(wc):
             res.append(f"tmp/aln/{sample}.bam")
         if config.get("kraken_db"):
             res.append(f"output/taxonid/kraken_report/{sample}.txt")
+            res.append("output/kraken_summary.tsv")
     if config.get("mash"):
         res.append("output/mash.dist.tsv")
     return res
@@ -287,6 +292,22 @@ rule mash_dist_set:
         " >{output}"
         " 2>{log}"
 
+
+rule kraken_summary:
+    input:
+        expand("output/taxonid/kraken_report/{sample}.txt", sample=config["samples"])
+    output:
+        "output/kraken_summary.tsv",
+    run:
+        with open(output[0], "w") as ofh:
+            print("sample", "percent_reads_lineage", "reads_lineage", "reads_taxon", "total_minimizers", "distinct_minimizers", "rank", "taxid", "taxon", sep="\t", file=ofh)
+            for rep in input:
+                sample = re.sub(r".*/(.+).txt$", r"\1", rep)
+                with open(rep) as rfh:
+                    for line in rfh:
+                        l=line.rstrip().split('\t')
+                        l[-1] = l[-1].strip()
+                        print(sample, *l, sep="\t", file=ofh)
 """
 ######################################### END SNAKEFILE #######################################################
 
